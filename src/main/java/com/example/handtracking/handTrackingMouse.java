@@ -83,22 +83,113 @@ public class handTrackingMouse extends Activity {
     private static final String INPUT_NUM_HANDS_SIDE_PACKET_NAME = "num_hands";
     private static final int NUM_HANDS = 2;
     private static final String OUTPUT_LANDMARKS_STREAM_NAME = "hand_landmarks";
-    private ImageView mImageView;
-    private ArrayList<Button> allButtons;
+    private static SurfaceView previewDisplayView;
+    public static ImageView mImageView;
+    public static ArrayList<Button> allButtons;
     // Creates and manages an {@link EGLContext}.
-    private EglManager eglManager;
+    public static EglManager eglManager;
     // Sends camera-preview frames into a MediaPipe graph for processing, and displays the processed
     // frames onto a {@link Surface}.
-    private FrameProcessor processor;
+    public static FrameProcessor processor;
     private ArrayList<Float> positionsX = new ArrayList<>();
     private ArrayList<Float> positionsY = new ArrayList<>();
     //Params
-    private ConstraintLayout.LayoutParams params;
+    private static ConstraintLayout.LayoutParams params;
     private Float previous_mouse_x = 0F;
     private Float previous_mouse_y = 0F;
     private Boolean clicked = false;
     private Button previous_button = null;
-    private int gestureHand = 0;
+    private static int gestureHand = 0;
+    private static ExternalTextureConverter converter;
+    // {@link SurfaceTexture} where the camera-preview frames can be accessed.
+    private static SurfaceTexture previewFrameTexture;
+    // Handles camera access via the {@link CameraX} Jetpack support library.
+    private static CameraXPreviewHelper cameraHelper;
+
+    public static void doCreate(Context con){
+        previewDisplayView = new SurfaceView(con);
+        satus(processor);
+    }
+    public static void doSetupPreviewDisplayView(ViewGroup viewGroup) {
+        previewDisplayView.setVisibility(View.GONE);
+//        ViewGroup viewGroup = findViewById(R.id.preview_display_layout);
+        viewGroup.addView(previewDisplayView);
+
+        previewDisplayView
+                .getHolder()
+                .addCallback(
+                        new SurfaceHolder.Callback() {
+                            @Override
+                            public void surfaceCreated(SurfaceHolder holder) {
+                                processor.getVideoSurfaceOutput().setSurface(holder.getSurface());
+                            }
+
+                            @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
+                            @Override
+                            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                                onPreviewDisplaySurfaceChanged(holder, format, width, height);
+                            }
+
+                            @Override
+                            public void surfaceDestroyed(SurfaceHolder holder) {
+                                processor.getVideoSurfaceOutput().setSurface(null);
+                            }
+                        });
+    }
+    @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
+    protected static void onPreviewDisplaySurfaceChanged(
+            SurfaceHolder holder, int format, int width, int height) {
+        // (Re-)Compute the ideal size of the camera-preview display (the area that the
+        // camera-preview frames get rendered onto, potentially with scaling and rotation)
+        // based on the size of the SurfaceView that contains the display.
+        Size viewSize = new Size(width, height);
+        Size displaySize = cameraHelper.computeDisplaySizeFromViewSize(viewSize);
+        boolean isCameraRotated = cameraHelper.isCameraRotated();
+        // Connect the converter to the camera-preview frames as its input (via
+        // previewFrameTexture), and configure the output width and height as the computed
+        // display size.
+        converter.setSurfaceTextureAndAttachToGLContext(
+                previewFrameTexture,
+                isCameraRotated ? width : width,
+                isCameraRotated ? height : height);
+    }
+    public static void doResume(){
+        converter =
+                new ExternalTextureConverter(
+                        eglManager.getContext(), 2);
+        converter.setFlipY(FLIP_FRAMES_VERTICALLY);
+        converter.setConsumer(processor);
+    }
+    public static void doPause() {
+        converter.close();
+        // Hide preview display until we re-open the camera again.
+        previewDisplayView.setVisibility(View.GONE);
+    }
+    public static void doCameraStarted(SurfaceTexture surfaceTexture) {
+        previewFrameTexture = surfaceTexture;
+        // Make the display view visible to start showing the preview. This triggers the
+        // SurfaceHolder.Callback added to (the holder of) previewDisplayView.
+        previewDisplayView.setVisibility(View.VISIBLE);
+    }
+    public void startCamera() {
+        cameraHelper = new CameraXPreviewHelper();
+        cameraHelper.setOnCameraStartedListener(
+                surfaceTexture -> {
+                    onCameraStarted(surfaceTexture);
+                });
+        CameraHelper.CameraFacing cameraFacing = CameraHelper.CameraFacing.FRONT;
+        cameraHelper.startCamera(this, cameraFacing, /*unusedSurfaceTexture=*/ null, cameraTargetResolution());
+    }
+
+    protected Size cameraTargetResolution() {
+        return null; // No preference and let the camera (helper) decide.
+    }
+    protected void onCameraStarted(SurfaceTexture surfaceTexture) {
+        previewFrameTexture = surfaceTexture;
+        // Make the display view visible to start showing the preview. This triggers the
+        // SurfaceHolder.Callback added to (the holder of) previewDisplayView.
+        previewDisplayView.setVisibility(View.VISIBLE);
+    }
     //    Setting MediaPipe environment and call handlandmarks
     public void init(ImageView mmImageView, ArrayList<Button> aallButtons,
                      EglManager eeglManager, FrameProcessor pprocessor,
@@ -108,19 +199,18 @@ public class handTrackingMouse extends Activity {
         eglManager = eeglManager;
         processor = pprocessor;
         params = pparams;
+        Log.d("GESTURE","init"+mmImageView+allButtons+eeglManager+pprocessor+pparams);
     }
-    public void satus(){
-        processor
+    public static void satus(FrameProcessor processo){
+        processo
                 .getVideoSurfaceOutput()
                 .setFlipY(FLIP_FRAMES_VERTICALLY);
-
-        PermissionHelper.checkAndRequestCameraPermissions(this);
-        AndroidPacketCreator packetCreator = processor.getPacketCreator();
+        AndroidPacketCreator packetCreator = processo.getPacketCreator();
         Map<String, Packet> inputSidePackets = new HashMap<>();
         inputSidePackets.put(INPUT_NUM_HANDS_SIDE_PACKET_NAME, packetCreator.createInt32(NUM_HANDS));
-        processor.setInputSidePackets(inputSidePackets);
+        processo.setInputSidePackets(inputSidePackets);
 
-        processor.addPacketCallback(
+        processo.addPacketCallback(
                 OUTPUT_LANDMARKS_STREAM_NAME,
                 (packet) -> {
                     List<NormalizedLandmarkList> multiHandLandmarks =
@@ -296,7 +386,7 @@ public class handTrackingMouse extends Activity {
         }
         return avg;
     }
-    private int gestureHand(Boolean INDEXFINGER, Boolean MIDDLEFINGER, Boolean RINGFINGER, Boolean LITTLEFINGER){
+    private static int gestureHand(Boolean INDEXFINGER, Boolean MIDDLEFINGER, Boolean RINGFINGER, Boolean LITTLEFINGER){
         if (!MIDDLEFINGER && !RINGFINGER && !LITTLEFINGER){
             return 2;
         }
@@ -307,7 +397,7 @@ public class handTrackingMouse extends Activity {
             return 0;
         }
     }
-    private String getMultiHandLandmarksDebugString(List<NormalizedLandmarkList> multiHandLandmarks) {
+    private static String getMultiHandLandmarksDebugString(List<NormalizedLandmarkList> multiHandLandmarks) {
         if (multiHandLandmarks.isEmpty()) {
             return "No hand landmarks";
         }
@@ -334,7 +424,7 @@ public class handTrackingMouse extends Activity {
         }
         return multiHandLandmarksStr;
     }
-    private Float area(ArrayList<Float> landmarksX, ArrayList<Float> landmarksY ){
+    private static Float area(ArrayList<Float> landmarksX, ArrayList<Float> landmarksY){
         Float area =new Float (0);
         int numVertices = landmarksX.size();
         for (int i =0; i< numVertices - 1;i++) {
@@ -344,7 +434,7 @@ public class handTrackingMouse extends Activity {
         area = Math.abs(area) / 2.0f;
         return area;
     }
-    private Button IsInButton(Float xP, Float yP){
+    private static Button IsInButton(Float xP, Float yP){
         int mouseX = Math.round(xP);
         int mouseY = Math.round(yP);
         int mouseW = mImageView.getWidth();
@@ -363,13 +453,13 @@ public class handTrackingMouse extends Activity {
         }
         return null;
     }
-    private Float euclideanDistance(Float aX, Float bX, Float aY, Float bY){
+    private static Float euclideanDistance(Float aX, Float bX, Float aY, Float bY){
         double result = 0F;
         result = (float) Math.pow((aX-bX), 2) + Math.pow((aY-bY), 2);
         result = sqrt(result);
         return (float) result;
     }
-    private ArrayList<Boolean> defineFingerState(ArrayList<Float> axisX, ArrayList<Float> axisY){
+    private static ArrayList<Boolean> defineFingerState(ArrayList<Float> axisX, ArrayList<Float> axisY){
         Boolean INDEXFINGER = false;
         Boolean MIDDLEFINGER = false;
         Boolean RINGFINGER = false;
@@ -411,19 +501,19 @@ public class handTrackingMouse extends Activity {
         fingerState.add(LITTLEFINGER);
         return fingerState;
     }
-    private Float  mappingPoint( Float OldMax, Float OldMin, int NewMax, int NewMin, Float OldValue){
+    private static Float  mappingPoint(Float OldMax, Float OldMin, int NewMax, int NewMin, Float OldValue){
         Float result = 0F;
         result = (OldValue - OldMin) * (NewMax - NewMin);
         result = (result  / (OldMax - OldMin)) + NewMin;
         return  result;
     }
-    private int getScreenWidth() {
+    private static int getScreenWidth() {
         return Resources.getSystem().getDisplayMetrics().widthPixels;
     }
-    private int getScreenHeight() {
+    private static int getScreenHeight() {
         return Resources.getSystem().getDisplayMetrics().heightPixels;
     }
-    private Point getPointOfView(View view) {
+    private static Point getPointOfView(View view) {
         int[] location = new int[2];
         view.getLocationInWindow(location);
         return new Point(location[0],location[1]);
